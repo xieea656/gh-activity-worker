@@ -1,0 +1,43 @@
+/**
+ * Wrangler 配置 —— 一个 Worker 干两件事：
+ *   1) /api/heatmap → Worker 代码：读 KV 返回热力图 JSON（KV 空/坏时发 1 个 GraphQL 请求兜底）
+ *   2) 其余路径     → Workers Static Assets 托管的 React 展示站
+ *
+ * 刻意不放任何你的信息：
+ *   - 不写 routes（域名绑不绑、绑哪个，都在面板里点）
+ *   - 不写 vars   （HEATMAP_OWNER 在面板的 Variables 里填）
+ *   - 不写 secrets（GITHUB_TOKEN 在面板的 Secrets 里填）
+ *   - KV 只声明 binding 名，不写 id（在面板的 Bindings 里选命名空间）
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "gh-activity-worker",
+	"main": "worker/index.ts",
+	"compatibility_date": "2026-10-06",
+
+	// 不暴露任何 workers.dev 公网入口：能少一个公开面就少一个
+	"workers_dev": false,
+	"preview_urls": false,
+
+	"assets": {
+		// 未命中的路径回落 index.html，保证直接访问 widgets.yourname.top 能看到展示站
+		"not_found_handling": "single-page-application",
+		// 只有 /api/* 进 Worker，其它请求直接命中静态资源（不消耗 Worker 配额）
+		"run_worker_first": ["/api/*"]
+	},
+
+	"kv_namespaces": [
+		{
+			// 只声明绑定名。id 留空是刻意的：命名空间在面板里选，避免把你的 ID 提交进仓库
+			"binding": "HEATMAP_KV"
+		}
+	],
+
+	// 定时采集：UTC 时区，每天 03:17。北京时间凌晨 3 点 = UTC 前一天的 19 点
+	"crons": ["17 3 * * *"],
+
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true
+}

@@ -1,0 +1,17 @@
+# Workers 静态资源响应头。
+# 这个文件由 scripts/gen-headers.mjs 生成，别手改 —— 改 PARENT_ORIGIN 环境变量。
+# 只作用于「由资源系统直接返回」的响应（展示站的 HTML/JS/CSS）；
+# /api/* 由 Worker 代码自己设头（run_worker_first 只接管 /api/*），两者互不干扰。
+# 依据 https://developers.cloudflare.com/workers/configuration/static-assets/headers/
+
+/*
+  # 只有配进去的源能把我嵌进去。这是 iframe 方案的唯一访问控制面。
+  # frame-ancestors * 表示任何站点都能嵌 —— 能用就尽量收紧成你自己的博客地址。
+  Content-Security-Policy: frame-ancestors https://blog.example.com
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  # 小部件不是内容页，别进索引
+  X-Robots-Tag: noindex, nofollow
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

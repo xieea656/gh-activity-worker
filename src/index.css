@@ -1,0 +1,274 @@
+@import "tailwindcss";
+
+/*
+ * 明暗切换走 .dark class（博客是 darkMode:"class"，iframe 里也统一走 class）。
+ * 首屏的 dark 值由 main.tsx 从 URL 参数决定，不靠 prefers-color-scheme 兜底，
+ * 避免"先亮后暗"闪一下。
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * 组件（src/components/github-activity.tsx，一行不改）只用到 3 个 shadcn token：
+ * bg-card / bg-card/90 / bg-foreground / bg-foreground/5 / bg-foreground/[0.08] /
+ * text-foreground / text-foreground/70 / text-foreground/40 / text-background / ring-background
+ * 这里把它们接到 --hm-* 上，值在下面的 :root / html.dark 分支里定。
+ */
+@theme {
+	--color-card: var(--hm-card);
+	--color-foreground: var(--hm-foreground);
+	--color-background: var(--hm-background);
+	--font-sans:
+		"Roboto", "Noto Sans SC", "Noto Sans", system-ui, -apple-system, "Segoe UI",
+		sans-serif;
+}
+
+:root {
+	--hm-hue: 250;
+	/* 浅色：卡片纯白，前景近黑（略偏主题蓝），背景是卡片上用来做描边/头像环的中性浅灰 */
+	--hm-card: oklch(100% 0 0);
+	--hm-foreground: oklch(22% 0.015 264);
+	--hm-background: oklch(97% 0.006 264);
+	/* 独立打开（非 embed）时的页面底色，比卡片深一点，让白卡浮起来 */
+	--hm-page: oklch(96% 0.012 264);
+	color-scheme: light;
+}
+
+html.dark {
+	/* 深色：卡片近黑（与博客深色底 #16171d 同档），前景近白 */
+	--hm-card: oklch(15% 0.01 264);
+	--hm-foreground: oklch(95% 0.006 264);
+	--hm-background: oklch(21% 0.01 264);
+	--hm-page: oklch(11% 0.012 264);
+	color-scheme: dark;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+}
+
+html {
+	background: var(--hm-page);
+}
+
+/* 被嵌住时整个文档透明，露出博客自己的底色 */
+html.hm-embed {
+	background: transparent;
+}
+
+body {
+	min-height: 100%;
+	background: transparent;
+	color: var(--hm-foreground);
+	font-family: var(--font-sans);
+	font-size: 14px;
+	line-height: 1.45;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	text-rendering: optimizeLegibility;
+}
+
+/* 独立打开时给点呼吸感；被嵌住时归零，交给博客自己的 padding */
+#root {
+	padding: 24px 16px 40px;
+}
+
+html.hm-embed #root {
+	padding: 0;
+}
+
+/* 组件根带内联 width + max-w-full，margin-inline:auto 让它在中轴线上居中 */
+[data-slot="github-activity"] {
+	margin-inline: auto;
+}
+
+/*
+ * ?blur=0：关掉展开面板上的 backdrop-blur-xl（低端机掉帧时的逃生口）。
+ * 用 data-slot 属性选择器命中，不碰组件文件。
+ */
+html.hm-no-blur [data-slot="github-activity-panel"] {
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* 降级提示与调试信息                                                   */
+/* ------------------------------------------------------------------ */
+
+.hm-note {
+	margin: 12px auto 0;
+	max-width: 719px;
+	text-align: center;
+	font-size: 12px;
+	line-height: 1.5;
+	color: color-mix(in oklch, var(--hm-foreground) 62%, transparent);
+}
+
+.hm-debug {
+	margin: 10px auto 0;
+	max-width: 719px;
+	padding: 8px 12px;
+	border-radius: 10px;
+	font-size: 11px;
+	line-height: 1.6;
+	white-space: pre-wrap;
+	word-break: break-word;
+	color: color-mix(in oklch, var(--hm-foreground) 70%, transparent);
+	background: color-mix(in oklch, var(--hm-foreground) 6%, transparent);
+}
+
+/* ------------------------------------------------------------------ */
+/* 加载中骨架：形状对齐真实卡片（圆角 28px、p-4、标题条 + 53 列 × 7 行格子）*/
+/* 不用 spinner，也不做高频闪烁 —— 2.2s 的一次性轻微呼吸                 */
+/* ------------------------------------------------------------------ */
+
+.hm-skeleton {
+	width: min(719px, 100%);
+	margin-inline: auto;
+	padding: 16px;
+	border-radius: 28px;
+	background: var(--hm-card);
+}
+
+.hm-sk-bar {
+	height: 18px;
+	border-radius: 6px;
+	background: color-mix(in oklch, var(--hm-foreground) 8%, transparent);
+}
+
+.hm-sk-grid {
+	display: grid;
+	grid-template-columns: repeat(53, 11px);
+	grid-auto-rows: 11px;
+	gap: 2px;
+	justify-content: center;
+	margin-top: 16px;
+	animation: hm-breathe 2.2s ease-in-out infinite;
+}
+
+.hm-sk-grid > span {
+	border-radius: 3px;
+	background: color-mix(in oklch, var(--hm-foreground) 8%, transparent);
+}
+
+.hm-sk-foot {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 12px;
+	margin-top: 24px;
+	padding: 6px 8px;
+}
+
+.hm-sk-foot > span:first-child {
+	width: 168px;
+	height: 20px;
+	border-radius: 6px;
+	background: color-mix(in oklch, var(--hm-foreground) 8%, transparent);
+}
+
+.hm-sk-foot > span:last-child {
+	width: 28px;
+	height: 28px;
+	border-radius: 9999px;
+	background: color-mix(in oklch, var(--hm-foreground) 8%, transparent);
+}
+
+@keyframes hm-breathe {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.55;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.hm-sk-grid {
+		animation: none;
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* 错误卡：克制的一小块，居中，不上红色告警样式                          */
+/* ------------------------------------------------------------------ */
+
+.hm-error {
+	width: min(360px, 100%);
+	margin: 40px auto;
+	padding: 24px 20px;
+	border-radius: 20px;
+	background: var(--hm-card);
+	text-align: center;
+}
+
+.hm-error-title {
+	font-size: 15px;
+	font-weight: 500;
+	color: var(--hm-foreground);
+}
+
+.hm-error-text {
+	margin: 8px 0 0;
+	font-size: 13px;
+	line-height: 1.6;
+	color: color-mix(in oklch, var(--hm-foreground) 72%, transparent);
+}
+
+.hm-error-detail {
+	margin: 12px 0 0;
+	padding: 8px 10px;
+	border-radius: 8px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 11px;
+	line-height: 1.5;
+	word-break: break-word;
+	white-space: pre-wrap;
+	color: color-mix(in oklch, var(--hm-foreground) 62%, transparent);
+	background: color-mix(in oklch, var(--hm-foreground) 6%, transparent);
+}
+
+.hm-error-retry {
+	margin-top: 16px;
+	padding: 6px 16px;
+	border: 0;
+	border-radius: 9999px;
+	font: inherit;
+	font-size: 13px;
+	color: var(--hm-card);
+	background: var(--hm-foreground);
+	cursor: pointer;
+	transition: opacity 0.15s ease;
+}
+
+.hm-error-retry:hover {
+	opacity: 0.85;
+}
+
+.hm-error-retry:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+
+/* ------------------------------------------------------------------ */
+/* 署名：组件来自 Rare UI（MIT + Commons Clause + Attribution），        */
+/* 授权要求放可见链接。独立打开时显示在这里；嵌进博客时由博客自己的页脚承载  */
+/* ------------------------------------------------------------------ */
+
+.hm-credit {
+	margin: 14px auto 0;
+	max-width: 719px;
+	text-align: center;
+	font-size: 11px;
+	line-height: 1.5;
+	color: color-mix(in oklch, var(--hm-foreground) 50%, transparent);
+}
+
+.hm-credit a {
+	color: inherit;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
