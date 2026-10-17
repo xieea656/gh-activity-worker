@@ -1,0 +1,110 @@
+name: 采集 GitHub 活动
+
+# 每天 03:17 UTC 跑一次，另外可以手动触发。
+# 不整点是为了避开大量仓库在同一时刻跑定时任务造成的拥塞。
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: "GitHub 用户名（默认 ${{ github.actor }}）"
+        required: false
+        type: string
+        default: "${{ github.actor }}"
+
+# GITHUB_TOKEN 的默认权限是 contents:write，这里收窄到只读。
+#
+# 注意：`user` **不是**合法的 `permissions` 键。Actions 的这个键是固定枚举
+# （actions / attestations / checks / contents / deployments / discussions / id-token /
+#   issues / pages / pull-requests / repository-projects / security-events / statuses），
+# 写一个枚举外的键，整条 workflow 会在**校验阶段**就被拒：
+#   The workflow is not valid ... (Line: N): unexpected key 'user'
+# 作业根本不会开始跑，下面的实验也就永远不发生。所以这里只留 contents:read，
+# 让 github.token 用它默认能拿到的身份去试读 contributionsCollection —— 这本来就是要验的东西。
+#
+# 读到或读不到都不致命：脚本内置降级，calendar.available=false，界面走"只有仓库提交"那档，
+# 结果会打印到下面的汇总里。
+permissions:
+  contents: read
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # 先自检合约：三边共用 shared/schema2.ts，这一步能发现"合约改了三边没跟上"
+      - name: 合约自检
+        run: node --experimental-strip-types scripts/check-contract.mjs
+
+      # 采集。失败（--strict 下非零退出）→ 产物文件不存在 → 下面的写 KV 步骤被跳过，
+      # KV 里保留上一份数据，博客界面不会闪空。
+      - name: 采集
+        id: collect
+        env:
+          COLLECT_OWNER: ${{ inputs.owner || '${{ github.actor }}' }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/collect.mjs \
+            --owner "${COLLECT_OWNER}" \
+            --token "${GITHUB_TOKEN}" \
+            --strict \
+            --out "$RUNNER_TEMP/heatmap.json"
+
+      # 产物也要过合约，宁可本地失败也别让坏结构进 KV
+      - name: 校验产物
+        if: steps.collect.outcome == 'success'
+        run: node --experimental-strip-types scripts/check-contract.mjs --payload "$RUNNER_TEMP/heatmap.json"
+
+      - name: 写入 KV
+        if: steps.collect.outcome == 'success'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
+        run: node --experimental-strip-types scripts/put-kv.mjs --file "$RUNNER_TEMP/heatmap.json"
+
+      # 无论成败都留一条汇总，方便一眼看出今天的数字与降级情况
+      - name: 汇总
+        if: always()
+        env:
+          COLLECT_OWNER: ${{ inputs.owner || '${{ github.actor }}' }}
+        run: |
+          {
+            echo "### GitHub 活动采集"
+            echo ""
+            echo "| 字段 | 值 |"
+            echo "| --- | --- |"
+            echo "| owner | $COLLECT_OWNER |"
+            if [ -f "$RUNNER_TEMP/heatmap.json" ]; then
+              node -e '
+                const p = require(process.argv[1]);
+                const rows = [
+                  [`window`, `${p.window.from}..${p.window.to}（${p.window.days} 天）`],
+                  [`calendar.available`, `${p.calendar.available}`],
+                  [`calendar.total`, `${p.calendar.total}`],
+                  [`contributions 有活动的天数`, `${Object.values(p.calendar.daily).filter((v) => v > 0).length}`],
+                  [`commits.total`, `${p.commits.total}`],
+                  [`commits.repos`, `${p.commits.repos.length}`],
+                  [`warnings`, `${p.warnings.length}`],
+                ];
+                for (const [k, v] of rows) console.log(`| ${k} | ${v} |`);
+                // markdown 表格里转义竖线只需要一个反斜杠；这里要是写四个反斜杠，
+              // JS 字符串会变成 `\\|`（两个反斜杠 + 竖线），表格当场断掉。
+              for (const w of p.warnings.slice(0, 5)) console.log(`| warning | ${w.replace(/\|/g, "\\|")} |`);
+              ' "$RUNNER_TEMP/heatmap.json"
+            else
+              echo "| — | 采集失败，未写 KV（保留旧数据） |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,116 @@
+name: 部署到生产
+
+# 手动触发。定时采集在 collect.yml（每天 03:17 UTC）。
+# 之所以放在 Actions 里：部署不依赖我这台机器在线，且凭证只走 Actions Secrets。
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只做构建与打包校验，不真正上传"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+
+      - name: 合约自检
+        run: node --experimental-strip-types scripts/check-contract.mjs
+
+      - name: 构建
+        run: npm run build
+
+      # 静态资源里必须带上 _headers（frame-ancestors 只允许博客嵌入），
+      # 丢了它等于把 CSP 一起丢了，所以这里当构建门禁来断言，不是看一眼就算了。
+      - name: 断言构建产物含 _headers
+        run: |
+          set -euo pipefail
+          test -f dist/client/_headers || { echo "构建产物缺少 dist/client/_headers"; exit 1; }
+          grep -q "frame-ancestors" dist/client/_headers || { echo "_headers 里没有 frame-ancestors"; exit 1; }
+          echo "OK: $(wc -c < dist/client/_headers) 字节，含 frame-ancestors"
+
+      - name: 部署
+        if: ${{ !inputs.dry_run }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          # 自定义域由 wrangler.jsonc 里 routes[].custom_domain=true 声明，wrangler deploy 会一并创建
+          # （含 DNS 记录与证书）。这里不再手搓 POST —— 我先前照 GET 响应拼的 body 语义是错的。
+          npx --yes wrangler@4 deploy
+
+      - name: 断言自定义域已生效
+        if: ${{ !inputs.dry_run }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          curl -sS --max-time 20 -o /tmp/domains.json -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/domains"
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/domains.json'))
+          rows = [r for r in (d.get('result') or []) if r.get('hostname') == '<YOUR_WIDGET_DOMAIN>']
+          if not rows:
+              raise SystemExit('❌ <YOUR_WIDGET_DOMAIN> 未出现在 Workers 自定义域列表里')
+          r = rows[0]
+          print(f"✓ hostname={r['hostname']} service={r['service']} env={r['environment']} zone={r['zone_name']} previews_enabled={r.get('previews_enabled')}")
+          if r.get('service') != 'gh-widgets':
+              raise SystemExit(f"❌ 该域指向了别的 service: {r.get('service')}")
+          PY
+
+      - name: 部署后自检
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -uo pipefail
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 https://<YOUR_WIDGET_DOMAIN>/api/heatmap?owner=${{ github.actor }} || echo 000)
+            echo "第 $i 次 /api/heatmap -> $code"
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          echo "--- 资源响应头（应看到 CSP）---"
+          curl -sSI --max-time 20 https://<YOUR_WIDGET_DOMAIN>/ | grep -iE "^(HTTP|content-security|x-content-type|content-type|server|cf-ray)" || true
+          echo "--- 有没有多余的 workers.dev 预览可访问（不该有）---"
+          # 子域名从 API 现取，不硬编。实测：本账号的 workers.dev 子域就是纯数字 `<YOUR_WORKERS_DEV_SUBDOMAIN>`
+          # （CF 给部分账号自动分配数字子域），且该端点只返回 {subdomain}，**没有 enabled 字段**，
+          # 所以"是否启用"不能靠读这个字段判断，只能靠探测 URL 是否可访问。
+          SUB=$(curl -sS --max-time 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            | python3 -c "import json,sys;print((json.load(sys.stdin).get('result') or {}).get('subdomain') or '')")
+          ENA=$(curl -sS --max-time 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            | python3 -c "import json,sys;print((json.load(sys.stdin).get('result') or {}).get('enabled'))")
+          echo "账号 workers.dev 子域: ${SUB:-（空）} | enabled: $ENA"
+          if [ -n "$SUB" ]; then
+            # 实测语义：走代理时，连"故意编的不存在子域"也返回 404 —— 即 404 = 没有对外服务（正确形态），
+            # 200 才说明 workers.dev 公网入口被打开、多了一个可被举报/滥用的面。所以这里当断言用。
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 "https://gh-widgets.$SUB.workers.dev/" || echo 000)
+            echo "https://gh-widgets.$SUB.workers.dev/ -> $code"
+            if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
+              echo "❌ workers.dev 公网入口处于可访问状态，与「只用自定义域」的约定冲突"
+              exit 1
+            fi
+            echo "✅ workers.dev 未对外服务（$code）"
+          fi
