@@ -107,40 +107,133 @@ PARENT_ORIGIN = https://blog.example.com
 
 ## 嵌进博客
 
-```html
-<iframe
-  id="gh-activity"
-  src="https://widgets.example.com/?embed=1&dark=1&hue=250"
-  style="width: 100%; border: 0; overflow: hidden"
-  loading="lazy"
-></iframe>
-```
+博客端集成。整段直接抄：
 
-**高度自适应**（卡片把自身高度 postMessage 出来）：
+```astro
+---
+/**
+ * 首页"博客活动"栏 —— GitHub 活动展示 iframe 容器。
+ *
+ * 数据与展示由 https://widgets.example.com/ 承载（Cloudflare Workers + React +
+ * Rare UI github-activity 组件，见本仓库），本页只负责：
+ *   - 首屏把当前主题（dark/hue）拼进 iframe 的 src，避免"先亮后暗"闪一下；
+ *   - 监听 <html> 的 class / style 变化，主题切换时向 iframe 发 hm-theme；
+ *   - 接收 iframe 的 hm-height 消息，写 iframe.style.height 保持无内部滚动条。
+ *
+ * 注意：本仓库同一页面分组里只能存在一个 <style is:global> 块，
+ * 因此这里一律用 Tailwind 类与内联样式，不新增任何 <style> 块。
+ */
+interface Props {
+	class?: string;
+	style?: string;
+}
+const { class: className = "", style = "" } = Astro.props;
 
-```html
-<script>
-  const frame = document.getElementById('gh-activity')
-  const ORIGIN = 'https://widgets.example.com'
-  window.addEventListener('message', (event) => {
-    if (event.origin !== ORIGIN) return
-    if (event.data?.type === 'hm-height') frame.style.height = event.data.height + 'px'
-  })
+// 首屏占位高度，避免 iframe 加载期间出现 CLS 抖动（组件收起态约 120–140px）。
+const PLACEHOLDER_HEIGHT = "130px";
+---
+
+<div
+	class={`card-base px-9 py-6 w-full rounded-[var(--radius-large)] overflow-hidden ${className}`}
+	style={style}
+>
+	<iframe
+		data-widget="true"
+		data-base="https://widgets.example.com/"
+		loading="lazy"
+		frameborder="0"
+		scrolling="no"
+		title="博客活动：GitHub 活动热力图与仓库提交"
+		class="block w-full border-0"
+		style={`height: ${PLACEHOLDER_HEIGHT}; min-height: ${PLACEHOLDER_HEIGHT};`}
+	></iframe>
+	<noscript>
+		<div class="text-sm opacity-70">
+			本页在启用 JavaScript 后会在此显示 GitHub 活动；或直接访问
+			<a class="transition link text-[var(--primary)] font-medium" href="https://widgets.example.com/" target="_blank" rel="noopener noreferrer">
+				widgets.example.com
+			</a>
+			。
+		</div>
+	</noscript>
+</div>
+
+<script is:inline data-astro-rerun>
+	// 消息来源 / 目标都写死为 widgets 域，绝不接受任何 "*" 或不校验 origin 的写法。
+	const WIDGET_ORIGIN = "https://widgets.example.com";
+	const DEFAULT_HUE = 250;
+
+	// swup 翻页会让脚本重跑；先释放上一轮挂在全局的句柄，避免 listener / observer 累积。
+	const PREV = window.__ghActivityWidget;
+	if (PREV) {
+		if (PREV.observer) PREV.observer.disconnect();
+		if (PREV.onMessage) window.removeEventListener("message", PREV.onMessage);
+	}
+
+	const HOST = document.querySelector('[data-widget="true"]');
+	if (!HOST) {
+		/* 静默跳过：找不到宿主时不抛错，不影响页面其它功能。 */
+	} else {
+		const readTheme = function () {
+			const root = document.documentElement;
+			const dark = root.classList.contains("dark");
+			const raw = getComputedStyle(root).getPropertyValue("--hue").trim();
+			const parsed = Number.parseInt(raw, 10);
+			return { dark: dark, hue: Number.isFinite(parsed) ? parsed : DEFAULT_HUE };
+		};
+
+		const buildUrl = function (theme) {
+			const base = HOST.getAttribute("data-base") || (WIDGET_ORIGIN + "/");
+			const url = new URL(base);
+			url.searchParams.set("dark", theme.dark ? "1" : "0");
+			url.searchParams.set("hue", String(theme.hue));
+			url.searchParams.set("embed", "1");
+			return url.toString();
+		};
+
+		const sendTheme = function (theme) {
+			if (HOST.contentWindow) {
+				HOST.contentWindow.postMessage(
+					{ type: "hm-theme", dark: theme.dark, hue: theme.hue },
+					WIDGET_ORIGIN,
+				);
+			}
+		};
+
+		const applyHeight = function (height) {
+			if (Number.isFinite(height) && height > 0) {
+				HOST.style.height = height + "px";
+			}
+		};
+
+		// 首屏：把当前主题写进 iframe 的 src，避免"先亮后暗"。
+		HOST.src = buildUrl(readTheme());
+
+		// 接收 iframe 上报的高度；必须校验 origin，不接受任何非 widgets 域的消息。
+		// 用具名函数引用，以便 swup 重跑时 removeEventListener 能真正删掉。
+		const onMessage = function (event) {
+			if (event.origin !== WIDGET_ORIGIN) return;
+			const data = event.data;
+			if (!data || data.type !== "hm-height") return;
+			applyHeight(data.height ?? 0);
+		};
+		window.addEventListener("message", onMessage);
+
+		// 主题切换：博客切明暗就是改 <html> 的 class，改色相就是改 <html> 的 style。
+		// 变化时读一次当前值发给 iframe（不重建 iframe，避免闪烁）。
+		const root = document.documentElement;
+		const observer = new MutationObserver(function () {
+			sendTheme(readTheme());
+		});
+		observer.observe(root, { attributes: true, attributeFilter: ["class", "style"] });
+
+		// 把本轮句柄挂到全局槽，下一轮重跑时先释放。
+		window.__ghActivityWidget = { observer: observer, onMessage: onMessage };
+	}
 </script>
 ```
 
-**跟着博客的明暗主题走**（不用重新加载 iframe，直接发消息）：
-
-```js
-function syncTheme() {
-  const dark = document.documentElement.classList.contains('dark')
-  frame.contentWindow.postMessage({ type: 'hm-theme', dark, hue: 250 }, 'https://widgets.example.com')
-}
-// 切换主题时调一次
-syncTheme()
-```
-
-> 主题消息只在 `PARENT_ORIGIN` 收紧到你自己博客之后才允许进来。默认 `frame-ancestors *` 时任何人都能发，但发进去也只能改主题颜色，拿不到数据。
+样式类换成你博客自己的（`card-base`、`rounded-[var(--radius-large)]`、`text-[var(--primary)]` 是 CSS 变量名，值随博客主题走）。`swup` 相关那段（`data-astro-rerun`、`window.__ghActivityWidget` 释放句柄）只在博客用了 swup 翻页时才需要，其它框架删掉也无影响。
 
 **URL 参数**
 
